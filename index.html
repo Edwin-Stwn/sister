@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Parfumku Store - Hybrid System Demo</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 1000px; margin: 0 auto; }
+        header { text-align: center; margin-bottom: 30px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid #e1e8ed; }
+        .card h3 { margin-top: 0; color: #111; }
+        .brand { color: #888; font-size: 0.85em; text-transform: uppercase; letter-spacing: 1px; }
+        .price { font-size: 1.25em; color: #2ecc71; font-weight: bold; margin: 10px 0; }
+        .stock { font-size: 0.9em; color: #7f8c8d; margin-bottom: 15px; }
+        .form-group { margin-bottom: 10px; }
+        .form-group label { display: block; font-size: 0.85em; margin-bottom: 5px; color: #555; }
+        .form-group input { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { width: 100%; background: #3498db; color: white; border: none; padding: 10px; border-radius: 4px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+        button:hover { background: #2980b9; }
+        /* Log Box style */
+        #log-container { margin-top: 30px; background: #2c3e50; color: #ecf0f1; padding: 20px; border-radius: 8px; font-family: monospace; display: none; }
+        .success-text { color: #2ecc71; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>Parfumku</h1>
+        <h2>by Edwin Helmi Setiawan & Lutfi Syahrul Ramdani</h2>
+        <p>Simulasi Sistem Terdistribusi Hibrida (REST API & SOAP Interoperability)</p>
+    </header>
+
+    <div class="grid" id="katalog-parfum">
+        <p style="text-align: center; width: 100%;">Sedang memuat koleksi parfum...</p>
+    </div>
+
+    <div id="log-container">
+        <h3>🧾 Respon Transaksi Terdistribusi (JSON dari Server A):</h3>
+        <pre id="log-content"></pre>
+    </div>
+</div>
+
+<script>
+    const API_URL = 'http://localhost:8001/api';
+
+    // 1. Ambil data parfum dari REST API Server A saat halaman dimuat
+    async function loadParfum() {
+        try {
+            const response = await fetch(`${API_URL}/parfum`);
+            const result = await response.json();
+            
+            if (result.success) {
+                const katalogDiv = document.getElementById('katalog-parfum');
+                katalogDiv.innerHTML = ''; // bersihkan teks memuat
+
+                result.data.forEach(p => {
+                    katalogDiv.innerHTML += `
+                        <div class="card">
+                            <span class="brand">${p.brand}</span>
+                            <h3>${p.nama_parfum}</h3>
+                            <p style="font-size: 0.9em; color: #666;">${p.deskripsi}</p>
+                            <div class="price">Rp ${Number(p.harga).toLocaleString('id-ID')}</div>
+                            <div class="stock">Sisa Stok: <strong>${p.stok}</strong></div>
+                            
+                        <div class="form-group">
+                            <label>Jumlah Beli:</label>
+                            <input type="number" id="qty-${p.id}" placeholder="0" min="1" max="${p.stok}">
+                        </div>
+                        <div class="form-group">
+                            <label>Nomor Rekening Bank:</label>
+                            <input type="text" id="rek-${p.id}" placeholder="Masukkan nomor rekening">
+                        </div>
+                            <button onclick="prosesCheckout(${p.id})">Beli via SOAP Gateway</button>
+                        </div>
+                    `;
+                });
+            }
+        } catch (error) {
+            alert('Gagal mengambil data dari Server A. Pastikan Server A jalan!');
+        }
+    }
+
+    // 2. Kirim request Checkout (JSON) ke Server A
+    async function prosesCheckout(parfumId) {
+        const jumlahBeli = document.getElementById(`qty-${parfumId}`).value;
+        const noRekening = document.getElementById(`rek-${parfumId}`).value;
+
+        if(!noRekening) {
+            alert('Isi nomor rekening simulasi perbankan terlebih dahulu!');
+            return;
+        }
+
+        const payload = {
+            parfum_id: parseInt(parfumId),
+            jumlah_beli: parseInt(jumlahBeli),
+            nomor_rekening_pembeli: noRekening
+        };
+
+        try {
+            // Tampilkan log loading
+            const logContainer = document.getElementById('log-container');
+            const logContent = document.getElementById('log-content');
+            logContainer.style.display = 'block';
+            logContent.innerHTML = "Mengirim data JSON ke Server A...\nServer A sedang berkomunikasi dengan Server B via SOAP XML...";
+
+            const response = await fetch(`${API_URL}/checkout`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+
+            // Tampilkan payload response di layar untuk pembuktian interaksi hibrida
+            logContent.innerHTML = JSON.stringify(result, null, 2);
+            
+            if (result.success) {
+                logContent.classList.add('success-text');
+                alert(result.message);
+                loadParfum(); // Reload data untuk melihat update pengurangan stok
+            } else {
+                logContent.classList.remove('success-text');
+                alert('Transaksi Gagal: ' + result.message);
+            }
+
+        } catch (error) {
+            alert('Terjadi kesalahan jaringan atau server mati.');
+        }
+    }
+
+    // Jalankan fungsi load data saat halaman dibuka
+    loadParfum();
+</script>
+
+</body>
+</html>
