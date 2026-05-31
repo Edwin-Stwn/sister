@@ -1,59 +1,123 @@
 const express = require('express');
-const soap = require('soap');
 const mysql = require('mysql2/promise');
-const fs = require('fs');
-const path = require('path');
+const soap = require('soap');
+const bodyParser = require('body-parser');
+const cors = require('cors');
 
 const app = express();
-const port = 8002;
+const port = 8001;
 
-// Konfigurasi Database Terpusat dikunci ke db_parfumku
+app.use(cors());
+
+app.use(bodyParser.json());
+
 const dbConfig = {
     host: 'localhost',
-    user: 'root',      
-    password: '',      
+    user: 'root',
+    password: '',
     database: 'db_parfumku' // <-- Diubah ke database Anda
 };
 
-const paymentService = {
-    PaymentGatewayService: {
-        PaymentGatewayPort: {
-            prosesPembayaran: async function(args) {
-                const { invoiceNo, noRekening, nominal, produkId, jumlahBeli } = args;
-                
-                try {
-                    const connection = await mysql.createConnection(dbConfig);
-                    const refSoap = 'SOAP-REF-' + Math.floor(Math.random() * 900000 + 100000);
-                    
-                    // Query disesuaikan ke tabel transaksi_parfum
-                    const query = `INSERT INTO transaksi_parfum 
-                        (invoice_no, parfum_id, jumlah_beli, total_bayar, status_pembayaran, nomor_rekening_pembeli, referensi_soap) 
-                        VALUES (?, ?, ?, ?, 'SUCCESS', ?, ?)`;
-                    
-                    await connection.execute(query, [invoiceNo, produkId, jumlahBeli, nominal, noRekening, refSoap]);
-                    await connection.end();
+const soapServerUrl = 'http://localhost:8002/wsdl?wsdl';
 
-                    return {
-                        status: 'SUCCESS',
-                        referensiSoap: refSoap,
-                        pesan: `Pembayaran parfum sukses menggunakan rekening ${noRekening}`
-                    };
-                } catch (error) {
-                    return {
-                        status: 'FAILED',
-                        referensiSoap: '',
-                        pesan: 'Gagal memproses transaksi perbankan: ' + error.message
-                    };
-                }
-            }
-        }
+// 1. ENDPOINT REST: Ambil Koleksi Parfum (Format: JSON)
+app.get('/api/parfum', async (req, res) => {
+    try {
+        const connection = await mysql.createConnection(dbConfig);
+        const [rows] = await connection.execute('SELECT * FROM parfum');
+        await connection.end();
+        res.json({ success: true, data: rows });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
     }
-};
+});
 
-const wsdlXml = fs.readFileSync(path.join(__dirname, 'service.wsdl'), 'utf8');
+// 2. ENDPOINT REST: Checkout & Trigger Interoperabilitas SOAP
+app.post('/api/checkout', async (req, res) => {
+    const { parfum_id, jumlah_beli, nomor_rekening_pembeli } = req.body;
 
-app.listen(port, function() {
-    soap.listen(app, '/wsdl', paymentService, wsdlXml, function() {
-        console.log(`[Server B] SOAP Payment Gateway berjalan di http://localhost:${port}/wsdl?wsdl`);
-    });
+    // --- TAMBAHKAN VALIDASI INI ---
+    if (!parfum_id || !jumlah_beli || !nomor_rekening_pembeli) {
+        return res.status(400).json({
+            success: false,
+            message: "Gagal memproses! Pastikan 'parfum_id', 'jumlah_beli', dan 'nomor_rekening_pembeli' sudah terisi di Body JSON."
+        });
+    }
+
+    try {
+        const connection = await mysql.createConnection(dbConfig);
+        
+        // Pengecekan stok parfum
+        const [produk] = await connection.execute('SELECT * FROM parfum WHERE id = ?', [parfum_id]);
+        if (produk.length === 0) {
+            await connection.end();
+            return res.status(404).json({ success: false, message: 'Parfum tidak ditemukan' });
+        }
+
+        const dataParfum = produk[0];
+        if (dataParfum.stok < jumlah_beli) {
+            await connection.end();
+            return res.status(400).json({ success: false, message: 'Stok parfum habis atau tidak mencukupi' });
+        }
+
+        const totalBayar = dataParfum.harga * jumlah_beli;
+        const invoiceNo = 'INV-PFM-' + Date.now();
+
+        // Jembatan Interoperabilitas ke Server B (SOAP)
+        soap.createClient(soapServerUrl, async function(err, soapClient) {
+            if (err) {
+                await connection.end();
+                return res.status(500).json({ success: false, message: 'Gagal terhubung ke SOAP Server Bank' });
+            }
+
+            // Memastikan semua value diconvert ke String agar aman di XML SOAP
+            const soapArgs = {
+                invoiceNo: String(invoiceNo),
+                noRekening: String(nomor_rekening_pembeli),
+                nominal: String(totalBayar),
+                produkId: String(parfum_id),
+                jumlahBeli: String(jumlah_beli)
+            };
+
+            // Tembak RPC Legacy Bank
+            soapClient.prosesPembayaran(soapArgs, async function(err, soapResponse) {
+                if (err || !soapResponse || soapResponse.status !== 'SUCCESS') {
+                    await connection.end();
+                    return res.status(400).json({ 
+                        success: false, 
+                        message: 'Transaksi ditolak oleh Bank Simulator atau Server B Mati' 
+                    });
+                }
+
+                // Jika SOAP sukses, Server A memotong stok di tabel parfum
+                await connection.execute('UPDATE parfum SET stok = stok - ? WHERE id = ?', [jumlah_beli, parfum_id]);
+                await connection.end();
+
+                res.json({
+                    success: true,
+                    message: `Berhasil membeli ${jumlah_beli} botol ${dataParfum.nama_parfum}!`,
+                    detail: {
+                        invoice: invoiceNo,
+                        total_harga: totalBayar,
+                        bank_reference: soapResponse.referensiSoap,
+                        bank_message: soapResponse.pesan
+                    }
+                });
+            });
+        });
+
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.listen(port, () => {
+    console.log(`[Server A] E-Commerce Parfum REST API berjalan di http://localhost:${port}`);
+});
+
+// --- TAMBAHKAN CODE INI DI SERVER A ---
+app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    next();
 });
